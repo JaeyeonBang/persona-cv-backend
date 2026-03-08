@@ -28,10 +28,10 @@ PRESET_TONE_MAP = {
 }
 
 
-def build_system_prompt(user: dict, config: dict, context: str) -> str:
+def build_system_prompt(user: dict, config: dict, context: str, search_results: list = []) -> str:
     """페르소나 + Interviewer 설정을 바탕으로 시스템 프롬프트를 생성합니다."""
     pc = user.get("persona_config", {})
-    lang = "한국어" if config.get("language") == "ko" else "English"
+    lang = "한국어" if config.get("language", "ko") == "ko" else "English"
     tone = PRESET_TONE_MAP.get(pc.get("preset", "professional"), "전문적이고 논리적인 어조")
     speech = SPEECH_STYLE_MAP.get(config.get("speechStyle", "formal"), "격식체 (합니다/입니다)")
     length = ANSWER_LENGTH_MAP.get(config.get("answerLength", "medium"), "5~7문장으로 적당하게")
@@ -64,6 +64,17 @@ def build_system_prompt(user: dict, config: dict, context: str) -> str:
         "- 자료에 없는 내용은 지어내지 말고 모른다고 하세요.",
         "- 마크다운 문법은 사용하지 마세요.",
     ]
+
+    relevant = [r for r in search_results if r.similarity >= 0.25]
+    if relevant:
+        lines += [
+            "",
+            "## 인용 지침",
+            "- 참고 자료를 바탕으로 답변한 문장 끝에 [1], [2] 형식으로 출처 번호를 붙이세요.",
+            "- 예시: '저는 Kakao에서 3년간 근무했습니다. [1]'",
+            "- 출처 번호는 위 참고 자료의 [1], [2], [3] 번호와 동일하게 사용하세요.",
+            "- 자료를 사용하지 않은 일반적인 문장에는 번호를 붙이지 마세요.",
+        ]
 
     return "\n".join(lines)
 
@@ -110,7 +121,10 @@ async def stream_chat(system_prompt: str, question: str) -> AsyncIterator[str]:
                         continue
                     try:
                         parsed = json.loads(data)
-                        text = parsed.get("choices", [{}])[0].get("delta", {}).get("content")
+                        choices = parsed.get("choices", [])
+                        if not choices:
+                            continue
+                        text = choices[0].get("delta", {}).get("content")
                         if text:
                             yield text
                     except json.JSONDecodeError:

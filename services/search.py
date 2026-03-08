@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from db.supabase import get_client
 
 
@@ -8,6 +8,7 @@ class SearchResult:
     title: str
     content: str
     similarity: float
+    source_url: str | None = field(default=None)
 
 
 def search_documents(user_id: str, query_embedding: list[float], limit: int = 3) -> list[SearchResult]:
@@ -22,7 +23,7 @@ def search_documents(user_id: str, query_embedding: list[float], limit: int = 3)
         },
     ).execute()
 
-    return [
+    results = [
         SearchResult(
             id=row["id"],
             title=row["title"],
@@ -32,8 +33,17 @@ def search_documents(user_id: str, query_embedding: list[float], limit: int = 3)
         for row in (response.data or [])
     ]
 
+    if results:
+        doc_ids = [r.id for r in results]
+        url_resp = supabase.table("documents").select("id, source_url").in_("id", doc_ids).execute()
+        url_map = {row["id"]: row["source_url"] for row in (url_resp.data or [])}
+        for r in results:
+            r.source_url = url_map.get(r.id)
 
-def build_context(results: list[SearchResult], threshold: float = 0.3) -> str:
+    return results
+
+
+def build_context(results: list[SearchResult], threshold: float = 0.25) -> str:
     """검색 결과를 LLM 컨텍스트 문자열로 조합합니다."""
     relevant = [r for r in results if r.similarity >= threshold]
     if not relevant:

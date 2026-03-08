@@ -5,8 +5,8 @@ FastAPI 백엔드. Next.js 프론트엔드의 thin proxy를 통해 호출됨.
 ## 실행
 
 ```bash
-pip install -r requirements.txt
-uvicorn main:app --port 8001 --reload
+uv sync
+uv run uvicorn main:app --port 8001 --reload
 ```
 
 ## 환경변수 (`backend/.env`)
