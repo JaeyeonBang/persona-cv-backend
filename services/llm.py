@@ -65,34 +65,48 @@ def build_system_prompt(user: dict, config: dict, context: str, search_results: 
         "- 마크다운 문법은 사용하지 마세요.",
     ]
 
+    show_citation = config.get("showCitation", True)
     relevant = [r for r in search_results if r.similarity >= 0.25]
-    if relevant:
+    if relevant and show_citation:
+        doc_list = "\n".join(f"  [{i+1}] {r.title}" for i, r in enumerate(relevant))
         lines += [
             "",
-            "## 인용 지침",
-            "- 참고 자료를 바탕으로 답변한 문장 끝에 [1], [2] 형식으로 출처 번호를 붙이세요.",
-            "- 예시: '저는 Kakao에서 3년간 근무했습니다. [1]'",
-            "- 출처 번호는 위 참고 자료의 [1], [2], [3] 번호와 동일하게 사용하세요.",
-            "- 자료를 사용하지 않은 일반적인 문장에는 번호를 붙이지 마세요.",
+            "## 출처 표기 규칙 (반드시 준수)",
+            "참고 자료 목록:",
+            doc_list,
+            "",
+            "규칙:",
+            "1. 참고 자료의 내용을 사용한 모든 문장 끝에 반드시 [번호] 형식으로 출처를 표기하세요.",
+            "2. 출처 번호는 위 '참고 자료 목록'의 번호와 동일하게 사용하세요.",
+            "3. 여러 자료를 참고한 경우 [1][2] 처럼 나란히 붙이세요.",
+            "4. 반드시 각 문장 끝 마침표 앞에 붙이세요. 예시:",
+            "   - '저는 카카오에서 3년간 근무했습니다. [1]'",
+            "   - '주요 기술 스택은 React와 TypeScript입니다. [2]'",
+            "   - '해당 프로젝트에서 MAU 10만을 달성했습니다. [1][3]'",
         ]
 
     return "\n".join(lines)
 
 
-async def stream_chat(system_prompt: str, question: str) -> AsyncIterator[str]:
+async def stream_chat(system_prompt: str, question: str, history: list = []) -> AsyncIterator[str]:
     """OpenRouter SSE 스트리밍 응답을 텍스트 청크로 yield합니다."""
     api_key = os.environ["OPENROUTER_API_KEY"]
     base_url = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
     model = os.environ.get("OPENROUTER_MODEL", "z-ai/glm-4.7-flash")
 
+    messages = [{"role": "system", "content": system_prompt}]
+    for msg in history:
+        role = msg.role if hasattr(msg, "role") else msg["role"]
+        content = msg.content if hasattr(msg, "content") else msg["content"]
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": question})
+
     payload = {
         "model": model,
         "stream": True,
         "max_tokens": 2000,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question},
-        ],
+        "messages": messages,
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:
