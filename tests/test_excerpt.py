@@ -1,6 +1,6 @@
 """_extract_relevant_excerpt 함수 단위 테스트"""
 import pytest
-from routers.chat import _extract_relevant_excerpt
+from services.agents.nodes import _extract_relevant_excerpt
 
 
 def test_returns_most_relevant_sentence():

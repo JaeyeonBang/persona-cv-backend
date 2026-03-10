@@ -152,6 +152,14 @@ async def factcheck_node(state: ChatState) -> dict[str, Any]:
             "final_answer": draft,
         }
 
+    # 답변이 짧으면 팩트체크 불필요
+    if len(draft.strip()) < 100:
+        return {
+            "fact_check_passed": True,
+            "fact_check_notes": "짧은 답변 — 팩트체크 생략",
+            "final_answer": draft,
+        }
+
     user_message = (
         f"참고 자료:\n{context[:2000]}\n\n"
         f"질문: {state['question']}\n\n"

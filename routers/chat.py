@@ -1,6 +1,6 @@
 import json
 import logging
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from db.supabase import get_client
@@ -29,7 +29,7 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/api/chat")
-async def chat(req: ChatRequest, background_tasks: BackgroundTasks):
+async def chat(req: ChatRequest):
     supabase = get_client()
 
     result = supabase.table("users").select("*").eq("username", req.username).single().execute()
@@ -64,7 +64,7 @@ async def chat(req: ChatRequest, background_tasks: BackgroundTasks):
             headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache"},
         )
 
-    # ── 4. LangGraph 실행 ──────────────────────────────────────────────────
+    # ── 4. LangGraph initial state ─────────────────────────────────────────
     initial_state: ChatState = {
         "username": req.username,
         "question": req.question,
@@ -83,49 +83,65 @@ async def chat(req: ChatRequest, background_tasks: BackgroundTasks):
         "final_answer": "",
     }
 
-    try:
-        final_state = await chat_graph.ainvoke(initial_state)
-    except Exception as e:
-        logger.error("LangGraph execution failed: %s", e)
-        raise HTTPException(status_code=503, detail="서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.")
-
-    # ── 5. 백그라운드 저장 ─────────────────────────────────────────────────
-    def _save() -> None:
-        try:
-            save_conversation(
-                user_id=user["id"],
-                session_id=req.sessionId,
-                question=req.question,
-                answer=final_state["final_answer"],
-                interviewer_config=req.config,
-                question_embedding=query_embedding,
-            )
-        except Exception as e:
-            logger.warning("save_conversation failed: %s", e)
-
-    background_tasks.add_task(_save)
-
-    # ── 6. SSE 스트리밍 ────────────────────────────────────────────────────
+    # ── 5. SSE 스트리밍 (astream_events) ──────────────────────────────────
     async def generate():
-        # 그래프 폴백 알림
-        if final_state["graph_fallback"]:
-            yield f"data: {json.dumps({'type': 'graph_fallback', 'used': True}, ensure_ascii=False)}\n\n"
+        final_state: dict = {}
+        draft_answer = ""
 
-        # 팩트체크 경고
-        if not final_state["fact_check_passed"]:
-            yield f"data: {json.dumps({'type': 'fact_check_warn', 'notes': final_state['fact_check_notes']}, ensure_ascii=False)}\n\n"
+        try:
+            async for event in chat_graph.astream_events(initial_state, version="v2"):
+                kind = event["event"]
+                name = event.get("name", "")
+                meta = event.get("metadata", {})
 
-        # 출처
-        yield f"data: {json.dumps({'type': 'citations', 'sources': final_state['citations']}, ensure_ascii=False)}\n\n"
+                # 각 노드 시작 → 상태 전송
+                if kind == "on_chain_start" and name in ("retrieval", "persona", "factcheck"):
+                    phase_map = {"retrieval": "retrieval", "persona": "generating", "factcheck": "factcheck"}
+                    yield f"data: {json.dumps({'type': 'status', 'phase': phase_map[name]}, ensure_ascii=False)}\n\n"
 
-        # 답변 청크 스트리밍 (단어 단위)
-        answer = final_state["final_answer"]
-        words = answer.split(" ")
-        for i, word in enumerate(words):
-            chunk = word if i == len(words) - 1 else word + " "
-            yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
+                # retrieval 노드 완료 → citations + graph_fallback 전송
+                elif kind == "on_chain_end" and name == "retrieval":
+                    output = event["data"].get("output", {})
+                    final_state.update(output)
+                    if output.get("graph_fallback"):
+                        yield f"data: {json.dumps({'type': 'graph_fallback', 'used': True}, ensure_ascii=False)}\n\n"
+                    citations = output.get("citations", [])
+                    yield f"data: {json.dumps({'type': 'citations', 'sources': citations}, ensure_ascii=False)}\n\n"
+
+                # persona 노드 LLM 토큰 실시간 스트리밍
+                elif kind == "on_chat_model_stream" and meta.get("langgraph_node") == "persona":
+                    chunk = event["data"].get("chunk")
+                    if chunk and chunk.content:
+                        draft_answer += chunk.content
+                        yield f"data: {json.dumps({'type': 'text', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+
+                # factcheck 노드 완료 → fact_check_warn 전송
+                elif kind == "on_chain_end" and name == "factcheck":
+                    output = event["data"].get("output", {})
+                    final_state.update(output)
+                    if not output.get("fact_check_passed", True):
+                        yield f"data: {json.dumps({'type': 'fact_check_warn', 'notes': output.get('fact_check_notes', '')}, ensure_ascii=False)}\n\n"
+
+        except Exception as e:
+            logger.error("astream_events failed: %s", e)
+            yield f"data: {json.dumps({'type': 'error', 'message': '스트리밍 오류가 발생했습니다.'}, ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n"
+
+        # ── 6. 백그라운드 저장 ─────────────────────────────────────────────
+        final_answer = final_state.get("final_answer") or draft_answer
+        if final_answer:
+            try:
+                save_conversation(
+                    user_id=user["id"],
+                    session_id=req.sessionId,
+                    question=req.question,
+                    answer=final_answer,
+                    interviewer_config=req.config,
+                    question_embedding=query_embedding,
+                )
+            except Exception as e:
+                logger.warning("save_conversation failed: %s", e)
 
     return StreamingResponse(
         generate(),
