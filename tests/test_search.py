@@ -13,7 +13,7 @@ def test_empty_results_returns_empty_string():
 def test_all_below_threshold_returns_empty_string():
     results = [
         make_result("1", "A", "content", 0.1),
-        make_result("2", "B", "content", 0.29),
+        make_result("2", "B", "content", 0.24),
     ]
     assert build_context(results) == ""
 

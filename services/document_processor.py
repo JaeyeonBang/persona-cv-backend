@@ -124,6 +124,9 @@ async def process_document(document_id: str) -> None:
 
         _progress[document_id] = 20
 
+        # 기존 청크 삭제 (재처리 시 중복 방지)
+        supabase.table("document_chunks").delete().eq("document_id", document_id).execute()
+
         # 청크 분할 + 임베딩 (20~90%)
         chunks = chunk_text(text)
         total = len(chunks)
@@ -146,6 +149,24 @@ async def process_document(document_id: str) -> None:
             supabase.table("document_chunks").insert(chunk_records).execute()
 
         _progress[document_id] = 95
+
+        # Graphiti Knowledge Graph 인덱싱 (Neo4j 미연결 시 graceful skip)
+        try:
+            from services.graphiti_client import add_episode, is_available
+            if is_available():
+                import logging as _log
+                _log.getLogger(__name__).info("Indexing doc %s to Graphiti...", document_id)
+                # 청크 단위로 에피소드 추가 (너무 많으면 처음 10개만)
+                for chunk_rec in chunk_records[:10]:
+                    await add_episode(
+                        group_id=doc["user_id"],
+                        name=doc["title"],
+                        content=chunk_rec["content"],
+                        source=doc.get("type", "document"),
+                    )
+        except Exception as e:
+            import logging as _log
+            _log.getLogger(__name__).warning("Graphiti indexing skipped: %s", e)
 
         # documents 테이블 상태 업데이트
         supabase.table("documents").update({

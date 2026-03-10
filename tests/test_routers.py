@@ -35,8 +35,9 @@ def test_chat_user_not_found_returns_404():
         response = client.post(
             "/api/chat",
             json={
-                "userId": "nonexistent",
+                "username": "nonexistent",
                 "question": "안녕",
+                "history": [],
                 "config": {"language": "ko", "speechStyle": "formal", "answerLength": "medium", "questionStyle": "free"},
             },
         )
