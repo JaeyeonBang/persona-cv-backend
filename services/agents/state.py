@@ -20,6 +20,7 @@ class ChatState(TypedDict):
     context: str
     graph_fallback: bool
     citations: list[dict]
+    pinned_qa_context: str              # 사전 준비된 Q&A 컨텍스트
 
     # ─── Persona Node ─────────────────────────────────────────────────────
     draft_answer: str

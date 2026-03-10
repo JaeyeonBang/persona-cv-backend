@@ -77,6 +77,7 @@ async def chat(req: ChatRequest):
         "context": "",
         "graph_fallback": False,
         "citations": [],
+        "pinned_qa_context": "",
         "draft_answer": "",
         "fact_check_passed": True,
         "fact_check_notes": "",

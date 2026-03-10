@@ -6,7 +6,7 @@ load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import chat, documents, progress, graphiti
+from routers import chat, documents, progress, graphiti, pinned_qa
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,7 +21,7 @@ allow_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
-    allow_methods=["POST", "GET"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -29,6 +29,7 @@ app.include_router(chat.router)
 app.include_router(documents.router)
 app.include_router(progress.router)
 app.include_router(graphiti.router)
+app.include_router(pinned_qa.router)
 
 
 @app.get("/health")

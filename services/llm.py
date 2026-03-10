@@ -28,7 +28,7 @@ PRESET_TONE_MAP = {
 }
 
 
-def build_system_prompt(user: dict, config: dict, context: str, search_results: list = []) -> str:
+def build_system_prompt(user: dict, config: dict, context: str, search_results: list = [], pinned_qa_context: str = "") -> str:
     """페르소나 + Interviewer 설정을 바탕으로 시스템 프롬프트를 생성합니다."""
     pc = user.get("persona_config", {})
     lang = "한국어" if config.get("language", "ko") == "ko" else "English"
@@ -38,7 +38,20 @@ def build_system_prompt(user: dict, config: dict, context: str, search_results: 
     style = QUESTION_STYLE_MAP.get(config.get("questionStyle", "free"), "자유로운 대화처럼")
     custom_prompt = pc.get("custom_prompt")
 
-    lines = [
+    lines: list[str] = []
+
+    # Pinned Q&A가 있으면 최우선 컨텍스트로 추가
+    if pinned_qa_context:
+        lines += [
+            pinned_qa_context,
+            "",
+            "## 사전 답변 활용 규칙",
+            "- 방문자의 질문이 위 '사전 준비된 답변' 중 하나와 관련이 있다면, 해당 답변을 기반으로 응답하세요.",
+            "- 사전 답변은 Owner가 직접 작성한 것이므로 최우선으로 활용하세요.",
+            "",
+        ]
+
+    lines += [
         f"당신은 {user['name']}입니다.",
         f"직책: {user['title']}",
         f"소개: {user['bio']}",

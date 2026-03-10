@@ -57,6 +57,31 @@ def _extract_relevant_excerpt(content: str, query: str, max_len: int = 200) -> s
 
 # ─── 노드 1: 검색 ──────────────────────────────────────────────────────────
 
+def _load_pinned_qa(user_id: str) -> str:
+    """사용자의 pinned Q&A를 로드해 컨텍스트 문자열로 반환."""
+    from db.supabase import get_client
+    try:
+        supabase = get_client()
+        result = (
+            supabase.table("pinned_qa")
+            .select("question, answer")
+            .eq("user_id", user_id)
+            .order("display_order")
+            .execute()
+        )
+        rows = result.data or []
+        if not rows:
+            return ""
+        lines = ["## 사전 준비된 답변 (Owner가 직접 작성)"]
+        for i, row in enumerate(rows, 1):
+            lines.append(f"\nQ{i}. {row['question']}")
+            lines.append(f"A{i}. {row['answer']}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning("pinned_qa load failed: %s", e)
+        return ""
+
+
 async def retrieval_node(state: ChatState) -> dict[str, Any]:
     """질문 임베딩 + pgvector / Graphiti 하이브리드 검색."""
     question = state["question"]
@@ -66,6 +91,9 @@ async def retrieval_node(state: ChatState) -> dict[str, Any]:
     query_embedding: list[float] = state.get("query_embedding") or []
     if not query_embedding:
         query_embedding = embed(question)
+
+    # Pinned Q&A 로드 (우선순위 컨텍스트)
+    pinned_qa_context = _load_pinned_qa(user_id)
 
     search_results, graph_context = await hybrid_search(
         user_id=user_id,
@@ -95,6 +123,7 @@ async def retrieval_node(state: ChatState) -> dict[str, Any]:
         "context": context,
         "graph_fallback": bool(graph_context),
         "citations": citations,
+        "pinned_qa_context": pinned_qa_context,
     }
 
 
@@ -107,6 +136,7 @@ async def persona_node(state: ChatState) -> dict[str, Any]:
         state["config"],
         state["context"],
         state["search_results"],
+        state.get("pinned_qa_context", ""),
     )
 
     messages: list[Any] = [SystemMessage(content=system_prompt)]

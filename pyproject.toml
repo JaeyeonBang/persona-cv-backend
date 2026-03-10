@@ -19,6 +19,7 @@ dependencies = [
     "langgraph>=1.0.1",
     "langchain-openai>=0.2.2",
     "langsmith>=0.7.16",
+    "psycopg2-binary>=2.9.11",
 ]
 
 [dependency-groups]
