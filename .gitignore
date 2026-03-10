@@ -6,3 +6,5 @@ __pycache__/
 venv/
 *.egg-info/
 dist/
+bash.exe.stackdump
+test_fetch.py
