@@ -5,35 +5,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from db.supabase import get_client
 from services.embeddings import embed
-from services.search import hybrid_search, build_context
-from services.llm import build_system_prompt, stream_chat
 from services.conversations import check_cache, save_conversation
+from services.agents.graph import chat_graph
+from services.agents.state import ChatState
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-def _extract_relevant_excerpt(content: str, query: str, max_len: int = 200) -> str:
-    """청크 내에서 query 키워드와 가장 관련 높은 문장을 추출한다."""
-    import re
-    sentences = [s.strip() for s in re.split(r'(?<=[.!?。])\s+|(?<=\n)', content) if s.strip()]
-    if not sentences:
-        return content[:max_len]
-
-    query_words = set(re.sub(r'[^\w]', ' ', query.lower()).split())
-    if not query_words:
-        return sentences[0][:max_len]
-
-    def score(sentence: str) -> int:
-        words = set(re.sub(r'[^\w]', ' ', sentence.lower()).split())
-        return len(query_words & words)
-
-    best = max(sentences, key=score)
-    # 가장 관련 높은 문장 + 앞뒤 문맥 1문장씩 포함
-    idx = sentences.index(best)
-    parts = sentences[max(0, idx - 1): idx + 2]
-    excerpt = ' '.join(parts)
-    return excerpt[:max_len] if len(excerpt) > max_len else excerpt
 
 QUESTION_MAX_LEN = 1000
 
@@ -60,87 +37,95 @@ async def chat(req: ChatRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=404, detail="User not found")
     user = result.data
 
-    query_embedding: list[float] | None = None
-    search_results = []
-    context = ""
-    graph_context = ""
-
+    # ── 1. 임베딩 (캐시 체크에도 필요) ────────────────────────────────────
     try:
         query_embedding = embed(req.question)
     except Exception as e:
-        logger.error("embed() failed for question=%r: %s", req.question[:50], e)
-        raise HTTPException(status_code=503, detail="임베딩 서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.")
+        logger.error("embed() failed: %s", e)
+        raise HTTPException(status_code=503, detail="임베딩 서비스에 일시적인 문제가 발생했습니다.")
 
+    # ── 2. 캐시 체크 ───────────────────────────────────────────────────────
     cached = None
     try:
         cached = check_cache(user["id"], query_embedding)
     except Exception as e:
         logger.warning("cache check failed: %s", e)
 
-    try:
-        # 캐시 히트 여부 관계없이 citations 용도로 검색 실행
-        search_results, graph_context = await hybrid_search(
-            user_id=user["id"],
-            query=req.question,
-            query_embedding=query_embedding,
+    # ── 3. 캐시 히트 → 즉시 반환 ──────────────────────────────────────────
+    if cached:
+        async def stream_cached():
+            yield f"data: {json.dumps({'type': 'cache_hit'}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'text', 'content': cached.answer}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            stream_cached(),
+            media_type="text/event-stream; charset=utf-8",
+            headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-cache"},
         )
-        if not cached:
-            context = build_context(search_results)
-            if graph_context:
-                context = f"{context}\n\n{graph_context}".strip() if context else graph_context
+
+    # ── 4. LangGraph 실행 ──────────────────────────────────────────────────
+    initial_state: ChatState = {
+        "username": req.username,
+        "question": req.question,
+        "config": req.config,
+        "history": [{"role": m.role, "content": m.content} for m in req.history],
+        "session_id": req.sessionId,
+        "user_data": user,
+        "query_embedding": query_embedding,  # 재계산 방지
+        "search_results": [],
+        "context": "",
+        "graph_fallback": False,
+        "citations": [],
+        "draft_answer": "",
+        "fact_check_passed": True,
+        "fact_check_notes": "",
+        "final_answer": "",
+    }
+
+    try:
+        final_state = await chat_graph.ainvoke(initial_state)
     except Exception as e:
-        logger.error("RAG search failed for user=%s: %s", user["id"], e)
+        logger.error("LangGraph execution failed: %s", e)
+        raise HTTPException(status_code=503, detail="서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.")
 
-    system_prompt = build_system_prompt(user, req.config, context, search_results)
-
-    answer_parts: list[str] = []
-
-    def _save_sync() -> None:
+    # ── 5. 백그라운드 저장 ─────────────────────────────────────────────────
+    def _save() -> None:
         try:
             save_conversation(
                 user_id=user["id"],
                 session_id=req.sessionId,
                 question=req.question,
-                answer="".join(answer_parts),
+                answer=final_state["final_answer"],
                 interviewer_config=req.config,
-                question_embedding=query_embedding or [],
+                question_embedding=query_embedding,
             )
         except Exception as e:
             logger.warning("save_conversation failed: %s", e)
 
-    # citations 공통 생성 (캐시 히트 / 신규 공통)
-    citations = [
-        {
-            "index": i + 1,
-            "title": r.title,
-            "excerpt": _extract_relevant_excerpt(r.content, req.question),
-            "url": r.source_url,
-            "source": r.source,
-        }
-        for i, r in enumerate(search_results)
-        if r.similarity >= 0.25
-    ]
+    background_tasks.add_task(_save)
 
+    # ── 6. SSE 스트리밍 ────────────────────────────────────────────────────
     async def generate():
-        if cached:
-            yield f"data: {json.dumps({'type': 'cache_hit'}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'citations', 'sources': citations}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'text', 'content': cached.answer}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-            return
-        # Graphiti 폴백 사용 여부도 알림
-        if graph_context:
+        # 그래프 폴백 알림
+        if final_state["graph_fallback"]:
             yield f"data: {json.dumps({'type': 'graph_fallback', 'used': True}, ensure_ascii=False)}\n\n"
 
-        yield f"data: {json.dumps({'type': 'citations', 'sources': citations}, ensure_ascii=False)}\n\n"
+        # 팩트체크 경고
+        if not final_state["fact_check_passed"]:
+            yield f"data: {json.dumps({'type': 'fact_check_warn', 'notes': final_state['fact_check_notes']}, ensure_ascii=False)}\n\n"
 
-        async for chunk in stream_chat(system_prompt, req.question, req.history):
-            answer_parts.append(chunk)
+        # 출처
+        yield f"data: {json.dumps({'type': 'citations', 'sources': final_state['citations']}, ensure_ascii=False)}\n\n"
+
+        # 답변 청크 스트리밍 (단어 단위)
+        answer = final_state["final_answer"]
+        words = answer.split(" ")
+        for i, word in enumerate(words):
+            chunk = word if i == len(words) - 1 else word + " "
             yield f"data: {json.dumps({'type': 'text', 'content': chunk}, ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n"
-
-    background_tasks.add_task(_save_sync)
 
     return StreamingResponse(
         generate(),
