@@ -6,10 +6,12 @@ POST /api/pinned-qa                — 새 항목 저장
 PUT  /api/pinned-qa/{id}           — 답변 수정
 DELETE /api/pinned-qa/{id}         — 삭제
 POST /api/pinned-qa/generate       — AI 답변 초안 생성
+POST /api/pinned-qa/suggest        — 프로필+문서 기반 면접 Q&A 자동 생성
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -44,14 +46,18 @@ class GenerateRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
 
 
+class SuggestRequest(BaseModel):
+    username: str
+
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _get_llm() -> ChatOpenAI:
+def _get_llm(max_tokens: int = 4000) -> ChatOpenAI:
     return ChatOpenAI(
         model=os.environ.get("OPENROUTER_MODEL", "z-ai/glm-4.7-flash"),
         api_key=os.environ["OPENROUTER_API_KEY"],
         base_url=os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-        max_tokens=1000,
+        max_tokens=max_tokens,
     )
 
 
@@ -151,7 +157,7 @@ async def generate_answer(body: GenerateRequest):
     )
 
     try:
-        llm = _get_llm()
+        llm = _get_llm(max_tokens=4000)
         response = await llm.ainvoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=body.question),
@@ -160,3 +166,100 @@ async def generate_answer(body: GenerateRequest):
     except Exception as e:
         logger.error("generate_answer failed: %s", e)
         raise HTTPException(status_code=503, detail="AI 답변 생성에 실패했습니다.")
+
+
+@router.post("/api/pinned-qa/suggest")
+async def suggest_qa(body: SuggestRequest):
+    """프로필과 업로드 문서를 분석해 면접관이 물어볼 만한 Q&A 5개를 자동 생성한다."""
+    user = _get_user_by_username(body.username)
+    supabase = get_client()
+
+    # 사용자 문서 조회
+    docs_result = (
+        supabase.table("documents")
+        .select("id, title")
+        .eq("user_id", user["id"])
+        .limit(5)
+        .execute()
+    )
+    doc_ids = [d["id"] for d in (docs_result.data or [])]
+
+    doc_context = ""
+    if doc_ids:
+        chunks_result = (
+            supabase.table("document_chunks")
+            .select("content, document_id")
+            .in_("document_id", doc_ids)
+            .limit(15)
+            .execute()
+        )
+        seen: set[str] = set()
+        parts: list[str] = []
+        for chunk in (chunks_result.data or []):
+            doc_id = chunk["document_id"]
+            if doc_id not in seen:
+                seen.add(doc_id)
+                parts.append(chunk["content"][:800])
+        doc_context = "\n\n---\n\n".join(parts)
+
+    persona_intro = (
+        f"당신은 {user.get('name', '')}입니다.\n"
+        f"직책: {user.get('title', '')}\n"
+        f"소개: {user.get('bio', '')}\n"
+        f"참고 자료 요약:\n{doc_context[:1500] if doc_context else '(없음)'}"
+    )
+
+    try:
+        import asyncio as _asyncio
+        llm = _get_llm(max_tokens=8000)
+
+        # 1단계: 면접 질문 5개 생성 (단순 목록 형식)
+        q_response = await llm.ainvoke([
+            SystemMessage(content=persona_intro),
+            HumanMessage(
+                content=(
+                    "회사 면접관이 당신에게 물어볼 만한 핵심 질문 5개를 작성하세요. "
+                    "한 줄에 하나씩, 번호 없이 질문만 나열하세요."
+                )
+            ),
+        ])
+        raw_questions = q_response.content.strip()
+        logger.info("suggest_qa questions raw: %s", raw_questions[:300])
+
+        questions_list = [
+            line.strip().lstrip("0123456789.-). ").strip()
+            for line in raw_questions.splitlines()
+            if line.strip() and len(line.strip()) > 5
+        ][:5]
+
+        if not questions_list:
+            raise ValueError(f"질문 생성 실패: {raw_questions[:100]}")
+
+        # 2단계: 각 질문에 대한 답변을 병렬 생성 (generate_answer 방식 동일)
+        answer_system = (
+            f"{persona_intro}\n\n"
+            "아래 질문에 대해 본인의 입장에서 1인칭으로 자연스럽게 답변하세요. "
+            "마크다운 문법은 사용하지 말고, 3~5문장 정도로 답변하세요."
+        )
+
+        async def gen_answer(question: str) -> str:
+            r = await llm.ainvoke([
+                SystemMessage(content=answer_system),
+                HumanMessage(content=question),
+            ])
+            return r.content.strip()
+
+        answers = await _asyncio.gather(*[gen_answer(q) for q in questions_list])
+
+        pairs = [
+            {"question": q, "answer": a}
+            for q, a in zip(questions_list, answers)
+            if a
+        ]
+        if not pairs:
+            raise ValueError("답변 생성 결과 없음")
+        logger.info("suggest_qa produced %d pairs", len(pairs))
+        return pairs
+    except Exception as e:
+        logger.error("suggest_qa failed: %s", e)
+        raise HTTPException(status_code=503, detail="AI 질문 생성에 실패했습니다.")
