@@ -184,7 +184,8 @@ async def suggest_qa(body: SuggestRequest):
     )
     doc_ids = [d["id"] for d in (docs_result.data or [])]
 
-    doc_context = ""
+    # 문서별 첫 청크를 [N] title 형식으로 번호화 (채팅 RAG 방식과 동일)
+    numbered_docs: list[tuple[int, str, str]] = []  # (index, title, content)
     if doc_ids:
         chunks_result = (
             supabase.table("document_chunks")
@@ -193,20 +194,24 @@ async def suggest_qa(body: SuggestRequest):
             .limit(15)
             .execute()
         )
+        doc_title_map = {d["id"]: d["title"] for d in (docs_result.data or [])}
         seen: set[str] = set()
-        parts: list[str] = []
         for chunk in (chunks_result.data or []):
             doc_id = chunk["document_id"]
             if doc_id not in seen:
                 seen.add(doc_id)
-                parts.append(chunk["content"][:800])
-        doc_context = "\n\n---\n\n".join(parts)
+                title = doc_title_map.get(doc_id, "문서")
+                numbered_docs.append((len(numbered_docs) + 1, title, chunk["content"][:800]))
+
+    doc_context = "\n\n---\n\n".join(
+        f"[{idx}] {title}\n{content}" for idx, title, content in numbered_docs
+    )
 
     persona_intro = (
         f"당신은 {user.get('name', '')}입니다.\n"
         f"직책: {user.get('title', '')}\n"
         f"소개: {user.get('bio', '')}\n"
-        f"참고 자료 요약:\n{doc_context[:1500] if doc_context else '(없음)'}"
+        f"참고 자료:\n{doc_context[:2000] if doc_context else '(없음)'}"
     )
 
     try:
@@ -235,11 +240,18 @@ async def suggest_qa(body: SuggestRequest):
         if not questions_list:
             raise ValueError(f"질문 생성 실패: {raw_questions[:100]}")
 
-        # 2단계: 각 질문에 대한 답변을 병렬 생성 (generate_answer 방식 동일)
+        # 2단계: 각 질문에 대한 답변을 병렬 생성 (채팅 RAG 방식과 동일하게 출처 표기)
+        citation_rule = (
+            "\n\n## 출처 표기 규칙 (반드시 준수)\n"
+            "참고 자료의 내용을 활용한 문장 끝에는 반드시 [출처: 정확한_제목] 형식으로 출처를 표기하세요.\n"
+            "예시: '저는 해당 프로젝트에서 MAU 10만을 달성했습니다. [출처: 방재연_이력서.pdf]'\n"
+            "참고 자료를 사용하지 않은 일반적인 내용에는 출처를 붙이지 마세요."
+        ) if numbered_docs else ""
+
         answer_system = (
-            f"{persona_intro}\n\n"
-            "아래 질문에 대해 본인의 입장에서 1인칭으로 자연스럽게 답변하세요. "
-            "마크다운 문법은 사용하지 말고, 3~5문장 정도로 답변하세요."
+            f"{persona_intro}{citation_rule}\n\n"
+            "아래 질문에 대해 본인의 입장에서 1인칭으로 자연스럽게 3~5문장으로 답변하세요. "
+            "마크다운 문법은 사용하지 마세요."
         )
 
         async def gen_answer(question: str) -> str:
@@ -251,8 +263,9 @@ async def suggest_qa(body: SuggestRequest):
 
         answers = await _asyncio.gather(*[gen_answer(q) for q in questions_list])
 
+        sources = [{"id": d["id"], "title": d["title"]} for d in (docs_result.data or [])]
         pairs = [
-            {"question": q, "answer": a}
+            {"question": q, "answer": a, "sources": sources}
             for q, a in zip(questions_list, answers)
             if a
         ]

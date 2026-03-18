@@ -6,7 +6,7 @@ load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import chat, documents, progress, graphiti, pinned_qa
+from routers import chat, documents, progress, graphiti, pinned_qa, conversations, views
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +30,8 @@ app.include_router(documents.router)
 app.include_router(progress.router)
 app.include_router(graphiti.router)
 app.include_router(pinned_qa.router)
+app.include_router(conversations.router)
+app.include_router(views.router)
 
 
 @app.get("/health")

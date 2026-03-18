@@ -142,3 +142,47 @@ class TestSaveConversation:
         with patch("services.conversations.get_client", return_value=client):
             save_conversation("user-1", None, "q", "a", {}, [])
         client.table.return_value.insert.return_value.execute.assert_called_once()
+
+    def test_returns_conversation_id_string(self):
+        """save_conversation이 conversation_id 문자열을 반환한다."""
+        client = self._mock_supabase()
+        with patch("services.conversations.get_client", return_value=client):
+            result = save_conversation("user-1", None, "q", "a", {}, [])
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_uses_provided_conversation_id(self):
+        """conversation_id 파라미터를 제공하면 그 값을 insert payload에 사용한다."""
+        client = self._mock_supabase()
+        fixed_id = "pre-generated-uuid-abc"
+        with patch("services.conversations.get_client", return_value=client):
+            result = save_conversation("user-1", None, "q", "a", {}, [], conversation_id=fixed_id)
+        assert result == fixed_id
+        insert_payload = client.table.return_value.insert.call_args[0][0]
+        assert insert_payload["id"] == fixed_id
+
+    def test_generates_uuid_when_conversation_id_is_none(self):
+        """conversation_id가 None이면 새 UUID를 생성해 반환한다."""
+        client = self._mock_supabase()
+        with patch("services.conversations.get_client", return_value=client):
+            result = save_conversation("user-1", None, "q", "a", {}, [], conversation_id=None)
+        import uuid
+        # 유효한 UUID v4 형식인지 검증
+        parsed = uuid.UUID(result)
+        assert str(parsed) == result
+
+    def test_different_calls_generate_different_ids(self):
+        """conversation_id 없이 두 번 호출하면 서로 다른 ID를 반환한다."""
+        client = self._mock_supabase()
+        with patch("services.conversations.get_client", return_value=client):
+            id1 = save_conversation("user-1", None, "q1", "a1", {}, [])
+            id2 = save_conversation("user-1", None, "q2", "a2", {}, [])
+        assert id1 != id2
+
+    def test_insert_payload_contains_id_field(self):
+        """insert payload에 'id' 필드가 반드시 포함된다."""
+        client = self._mock_supabase()
+        with patch("services.conversations.get_client", return_value=client):
+            save_conversation("user-1", None, "q", "a", {}, [])
+        insert_payload = client.table.return_value.insert.call_args[0][0]
+        assert "id" in insert_payload

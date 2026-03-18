@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -54,6 +55,7 @@ async def chat(req: ChatRequest):
     # ── 3. 캐시 히트 → 즉시 반환 ──────────────────────────────────────────
     if cached:
         async def stream_cached():
+            yield f"data: {json.dumps({'type': 'conversation_id', 'id': cached.id}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'cache_hit'}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'text', 'content': cached.answer}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
@@ -86,6 +88,10 @@ async def chat(req: ChatRequest):
 
     # ── 5. SSE 스트리밍 (astream_events) ──────────────────────────────────
     async def generate():
+        # 대화 ID 미리 생성 → 프론트엔드에 전달해 피드백 연결
+        conversation_id = str(uuid.uuid4())
+        yield f"data: {json.dumps({'type': 'conversation_id', 'id': conversation_id}, ensure_ascii=False)}\n\n"
+
         final_state: dict = {}
         draft_answer = ""
 
@@ -140,6 +146,7 @@ async def chat(req: ChatRequest):
                     answer=final_answer,
                     interviewer_config=req.config,
                     question_embedding=query_embedding,
+                    conversation_id=conversation_id,
                 )
             except Exception as e:
                 logger.warning("save_conversation failed: %s", e)

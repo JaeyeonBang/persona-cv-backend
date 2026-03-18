@@ -1,3 +1,4 @@
+import uuid
 from dataclasses import dataclass
 from db.supabase import get_client
 
@@ -43,11 +44,14 @@ def save_conversation(
     answer: str,
     interviewer_config: dict,
     question_embedding: list[float],
-) -> None:
-    """Q&A 쌍과 질문 임베딩을 conversations 테이블에 저장합니다."""
+    conversation_id: str | None = None,
+) -> str:
+    """Q&A 쌍과 질문 임베딩을 conversations 테이블에 저장합니다. conversation_id를 반환합니다."""
     supabase = get_client()
+    cid = conversation_id or str(uuid.uuid4())
     supabase.table("conversations").insert(
         {
+            "id": cid,
             "user_id": user_id,
             "session_id": session_id or "",
             "question": question,
@@ -57,3 +61,4 @@ def save_conversation(
             "is_cached": False,
         }
     ).execute()
+    return cid
